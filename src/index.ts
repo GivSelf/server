@@ -96,7 +96,9 @@ async function main() {
     done();
   });
 
-  // Register routes
+  // Register routes — settings always available (even without cloud API)
+  const { settingsRoutes } = await import("./api/routes/settings.routes.js");
+  await settingsRoutes(app);
   await liveRoutes(app, adapter);
   await energyRoutes(app, adapter);
   await systemRoutes(app, adapter);
