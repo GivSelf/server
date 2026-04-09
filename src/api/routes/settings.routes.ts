@@ -42,4 +42,49 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     const dongleSerial = await getSetting("dongle_serial");
     return { required: !dongleSerial };
   });
+
+  // System info — uses cloud API if configured, otherwise returns basic info
+  app.get("/api/system/info", async () => {
+    const geKey = await getSetting("givenergy_api_key");
+    const geSerial = await getSetting("givenergy_inverter_serial");
+    if (geKey && geSerial) {
+      try {
+        const { GivEnergyCloudClient } = await import("../../cloud/givenergy-api.js");
+        const client = new GivEnergyCloudClient(geKey, geSerial);
+        const dongleSerial = geSerial.replace(/^FD/, "WH");
+        const info = await client.getDeviceInfo();
+        return info;
+      } catch (err) {
+        return { error: (err as Error).message };
+      }
+    }
+    return { message: "GivEnergy Cloud API not configured. Add your API key in Settings." };
+  });
+
+  // Data import — creates a client from provided or stored credentials
+  app.get("/api/import/status", async () => {
+    // Return a default status if no import is running
+    return { running: false, daysTotal: 0, daysCompleted: 0, barsImported: 0, error: null };
+  });
+
+  app.post<{
+    Body: { fromDate: string; toDate: string; clear?: boolean; apiKey?: string; inverterSerial?: string };
+  }>("/api/import/start", async (request) => {
+    const { fromDate, toDate, clear = false, apiKey, inverterSerial } = request.body;
+
+    // Use provided credentials or load from DB
+    const key = apiKey || await getSetting("givenergy_api_key");
+    const serial = inverterSerial || await getSetting("givenergy_inverter_serial");
+
+    if (!key || !serial) {
+      return { error: "GivEnergy API key and inverter serial are required. Configure them in Settings." };
+    }
+
+    const { GivEnergyCloudClient } = await import("../../cloud/givenergy-api.js");
+    const { ImportService } = await import("../../services/import.service.js");
+    const client = new GivEnergyCloudClient(key, serial);
+    const importService = new ImportService(client);
+    await importService.start(fromDate, toDate, clear);
+    return importService.getStatus();
+  });
 }

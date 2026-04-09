@@ -16,7 +16,6 @@ import { cloudRoutes } from "./api/routes/cloud.routes.js";
 import { SolcastClient } from "./cloud/solcast-api.js";
 import { ForecastSolarClient } from "./cloud/forecast-solar-api.js";
 import { ForecastService } from "./services/forecast.service.js";
-import { ImportService } from "./services/import.service.js";
 
 async function main() {
   const app = Fastify({ logger: true });
@@ -104,9 +103,8 @@ async function main() {
   await systemRoutes(app, adapter);
   await controlRoutes(app, adapter, boostService);
   await schedulesRoutes(app, adapter);
-  if (flowsService && cloudClient) {
-    const importService = new ImportService(cloudClient);
-    await cloudRoutes(app, flowsService, cloudClient, forecastService, importService);
+  if (flowsService) {
+    await cloudRoutes(app, flowsService, forecastService);
   }
   await registerWebSocket(app);
 
