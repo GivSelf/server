@@ -1,0 +1,70 @@
+name: Build & Publish Server
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: givself/server
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Fetch contracts tarball from latest contracts build
+      - name: Download contracts
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          repo: GivSelf/contracts
+          workflow: build.yml
+          name: givself-contracts
+          path: .
+        continue-on-error: true
+
+      # Fallback: use checked-in tarball if download fails
+      - name: Check tarball
+        run: ls -la givself-contracts-0.2.0.tgz
+
+      - name: Install dependencies
+        run: |
+          sed -i 's|"file:../givself-contracts/gen/ts"|"file:./givself-contracts-0.2.0.tgz"|' package.json
+          npm install
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+      # Docker build + push (only on main)
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
