@@ -159,3 +159,44 @@ export class ForecastService {
     this.tableReady = true;
   }
 }
+
+/** Standalone query function — works without a ForecastService instance */
+export async function getLatestForecastDirect(date: string): Promise<ForecastPoint[]> {
+  try {
+    const db = getDb();
+    // Ensure table exists
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS solar_forecasts (
+        fetched_at TIMESTAMPTZ NOT NULL,
+        period_end TIMESTAMPTZ NOT NULL,
+        pv_estimate_kw REAL NOT NULL,
+        source TEXT NOT NULL DEFAULT 'unknown'
+      )
+    `);
+
+    const nextDay = new Date(date + "T00:00:00Z");
+    nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+    const nextDateStr = nextDay.toISOString().split("T")[0];
+
+    const rows = await db.execute(sql`
+      SELECT period_end, pv_estimate_kw, source
+      FROM solar_forecasts
+      WHERE fetched_at = (
+        SELECT MAX(fetched_at) FROM solar_forecasts
+        WHERE period_end >= ${date}::timestamptz
+          AND period_end < ${nextDateStr}::timestamptz
+      )
+        AND period_end >= ${date}::timestamptz
+        AND period_end < ${nextDateStr}::timestamptz
+      ORDER BY period_end
+    `);
+
+    return rows.map((r: Record<string, unknown>) => ({
+      periodEnd: String(r.period_end),
+      pvEstimateKw: Number(r.pv_estimate_kw),
+      source: String(r.source || "unknown"),
+    }));
+  } catch {
+    return [];
+  }
+}

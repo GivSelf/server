@@ -87,4 +87,41 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     await importService.start(fromDate, toDate, clear);
     return importService.getStatus();
   });
+
+  // Energy flows — uses local DB first, falls back to cloud API
+  app.get<{
+    Querystring: { date?: string; grouping?: string };
+  }>("/api/energy/flows", async (request) => {
+    const { getOrCreateFlowsService } = await import("../../cloud/energy-flows.service.js");
+    const flowsService = await getOrCreateFlowsService();
+    if (!flowsService) return [];
+    const date = request.query.date || new Date().toISOString().split("T")[0];
+    const grouping = request.query.grouping || "half-hourly";
+    return flowsService.getFlows(date, grouping);
+  });
+
+  app.get<{
+    Querystring: { date?: string };
+  }>("/api/energy/flows/summary", async (request) => {
+    const { getOrCreateFlowsService } = await import("../../cloud/energy-flows.service.js");
+    const flowsService = await getOrCreateFlowsService();
+    if (!flowsService) return { pvToHome: 0, pvToBattery: 0, pvToGrid: 0, gridToHome: 0, gridToBattery: 0, batteryToHome: 0, batteryToGrid: 0, total: 0 };
+    const date = request.query.date || new Date().toISOString().split("T")[0];
+    return flowsService.getSummary(date);
+  });
+
+  // Solar forecast
+  app.get<{
+    Querystring: { date?: string };
+  }>("/api/forecast/solar", async (request) => {
+    try {
+      const { ForecastService } = await import("../../services/forecast.service.js");
+      // Use a static instance pattern — create once, reuse
+      const date = request.query.date || new Date().toISOString().split("T")[0];
+      const { getLatestForecastDirect } = await import("../../services/forecast.service.js");
+      return getLatestForecastDirect(date);
+    } catch {
+      return [];
+    }
+  });
 }

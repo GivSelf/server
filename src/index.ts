@@ -10,9 +10,6 @@ import { systemRoutes } from "./api/routes/system.routes.js";
 import { controlRoutes } from "./api/routes/control.routes.js";
 import { schedulesRoutes } from "./api/routes/schedules.routes.js";
 import { BoostService } from "./services/boost.service.js";
-import { GivEnergyCloudClient } from "./cloud/givenergy-api.js";
-import { EnergyFlowsService } from "./cloud/energy-flows.service.js";
-import { cloudRoutes } from "./api/routes/cloud.routes.js";
 import { SolcastClient } from "./cloud/solcast-api.js";
 import { ForecastSolarClient } from "./cloud/forecast-solar-api.js";
 import { ForecastService } from "./services/forecast.service.js";
@@ -37,23 +34,6 @@ async function main() {
 
   // Services
   const boostService = new BoostService(adapter);
-
-  // Cloud API (optional — DB settings first, then env fallback)
-  let flowsService: EnergyFlowsService | null = null;
-  let cloudClient: GivEnergyCloudClient | null = null;
-  {
-    const { getSetting } = await import("./services/settings.service.js");
-    const dbGeKey = await getSetting("givenergy_api_key");
-    const dbGeSerial = await getSetting("givenergy_inverter_serial");
-    const geKey = dbGeKey || config.givenergyApiKey;
-    const geSerial = dbGeSerial || config.givenergyInverterSerial;
-
-    if (geKey && geSerial) {
-      cloudClient = new GivEnergyCloudClient(geKey, geSerial);
-      flowsService = new EnergyFlowsService(cloudClient);
-      console.log(`[main] GivEnergy Cloud API enabled for ${geSerial}`);
-    }
-  }
 
   // Solar forecast services
   let forecastService: ForecastService | null = null;
@@ -103,9 +83,8 @@ async function main() {
   await systemRoutes(app, adapter);
   await controlRoutes(app, adapter, boostService);
   await schedulesRoutes(app, adapter);
-  if (flowsService) {
-    await cloudRoutes(app, flowsService, forecastService);
-  }
+  // Note: energy flows, forecast, system info, import, and settings endpoints
+  // are all registered unconditionally in settingsRoutes
   await registerWebSocket(app);
 
   // Start data collection

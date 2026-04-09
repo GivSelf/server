@@ -214,3 +214,16 @@ export class EnergyFlowsService {
     this.cache.set(key, { data: bars, expires: Date.now() + ttl });
   }
 }
+
+/** Singleton factory — creates EnergyFlowsService on demand from DB credentials */
+let _flowsInstance: EnergyFlowsService | null = null;
+export async function getOrCreateFlowsService(): Promise<EnergyFlowsService | null> {
+  if (_flowsInstance) return _flowsInstance;
+  const { getSetting } = await import("../services/settings.service.js");
+  const key = await getSetting("givenergy_api_key");
+  const serial = await getSetting("givenergy_inverter_serial");
+  if (!key || !serial) return null;
+  const client = new GivEnergyCloudClient(key, serial);
+  _flowsInstance = new EnergyFlowsService(client);
+  return _flowsInstance;
+}
