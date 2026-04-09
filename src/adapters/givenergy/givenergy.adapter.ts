@@ -29,6 +29,16 @@ export class GivEnergyAdapter implements EnergyAdapter {
   }
 
   async connect(): Promise<void> {
+    // Load dongle serial from DB if available
+    try {
+      const { getSetting } = await import("../../services/settings.service.js");
+      const dbSerial = await getSetting("dongle_serial");
+      if (dbSerial) {
+        this.serial = dbSerial;
+        console.log(`[givenergy] Using dongle serial from settings: ${dbSerial}`);
+      }
+    } catch {}
+
     this.client.on("error", (err) => console.error("[givenergy] Modbus error:", err.message));
     this.client.on("close", () => {
       console.warn("[givenergy] Connection closed, will reconnect on next request");

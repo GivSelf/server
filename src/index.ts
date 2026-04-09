@@ -59,16 +59,17 @@ async function main() {
   // Solar forecast services
   let forecastService: ForecastService | null = null;
   {
-    // Forecast.Solar — free, no auth, uses lat/lon/tilt/azimuth from env or defaults
-    const fsLat = parseFloat(process.env.FORECAST_LATITUDE || "51.5");
-    const fsLon = parseFloat(process.env.FORECAST_LONGITUDE || "-0.1");
-    const fsTilt = parseFloat(process.env.FORECAST_TILT || "35");
-    const fsAzimuth = parseFloat(process.env.FORECAST_AZIMUTH || "180");
-    const fsCapacity = parseFloat(process.env.FORECAST_CAPACITY_KWP || "5");
+    // Load forecast params: DB first (auto-populated from Solcast), then env fallback
+    const { getSetting } = await import("./services/settings.service.js");
+    const fsLat = parseFloat(await getSetting("forecast_latitude") || process.env.FORECAST_LATITUDE || "51.5");
+    const fsLon = parseFloat(await getSetting("forecast_longitude") || process.env.FORECAST_LONGITUDE || "-0.1");
+    const fsTilt = parseFloat(await getSetting("forecast_tilt") || process.env.FORECAST_TILT || "35");
+    const fsAzimuth = parseFloat(await getSetting("forecast_azimuth") || process.env.FORECAST_AZIMUTH || "180");
+    const fsCapacity = parseFloat(await getSetting("forecast_capacity_kwp") || process.env.FORECAST_CAPACITY_KWP || "5");
     const fsSolarClient = new ForecastSolarClient(fsLat, fsLon, fsTilt, fsAzimuth, fsCapacity);
+    console.log(`[main] Forecast.Solar: lat=${fsLat}, lon=${fsLon}, tilt=${fsTilt}, azimuth=${fsAzimuth}, capacity=${fsCapacity}kWp`);
 
     // Load Solcast credentials: DB first, then env fallback
-    const { getSetting } = await import("./services/settings.service.js");
     const dbSolcastKey = await getSetting("solcast_api_key");
     const dbSolcastSite = await getSetting("solcast_site_id");
     const solcastKey = dbSolcastKey || config.solcastApiKey;

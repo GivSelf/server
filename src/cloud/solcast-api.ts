@@ -28,6 +28,18 @@ export class SolcastClient {
     return res.estimated_actuals || [];
   }
 
+  /** Get site info (lat, lon, tilt, azimuth, capacity). Not rate-limited against forecast quota. */
+  async getSiteInfo(): Promise<SolcastSiteInfo> {
+    const url = `${BASE_URL}/rooftop_sites/${this.siteId}?format=json&api_key=${this.apiKey}`;
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Solcast API ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await res.json() as Record<string, unknown>;
+    return data as unknown as SolcastSiteInfo;
+  }
+
   private async request(path: string): Promise<Record<string, SolcastForecastPoint[]>> {
     const url = `${BASE_URL}${path}&api_key=${this.apiKey}`;
     const res = await fetch(url, {
@@ -39,4 +51,16 @@ export class SolcastClient {
     }
     return res.json() as Promise<Record<string, SolcastForecastPoint[]>>;
   }
+}
+
+export interface SolcastSiteInfo {
+  name: string;
+  resource_id: string;
+  capacity: number;
+  latitude: number;
+  longitude: number;
+  azimuth: number;
+  tilt: number;
+  install_date: string;
+  loss_factor: number;
 }
