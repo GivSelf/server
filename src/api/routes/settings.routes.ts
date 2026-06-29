@@ -88,13 +88,12 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     return importService.getStatus();
   });
 
-  // Energy flows — uses local DB first, falls back to cloud API
+  // Energy flows — derived from locally-collected metrics; cloud is a last resort
   app.get<{
     Querystring: { date?: string; grouping?: string };
   }>("/api/energy/flows", async (request) => {
     const { getOrCreateFlowsService } = await import("../../cloud/energy-flows.service.js");
     const flowsService = await getOrCreateFlowsService();
-    if (!flowsService) return [];
     const date = request.query.date || new Date().toISOString().split("T")[0];
     const grouping = request.query.grouping || "half-hourly";
     return flowsService.getFlows(date, grouping);
@@ -105,7 +104,6 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   }>("/api/energy/flows/summary", async (request) => {
     const { getOrCreateFlowsService } = await import("../../cloud/energy-flows.service.js");
     const flowsService = await getOrCreateFlowsService();
-    if (!flowsService) return { pvToHome: 0, pvToBattery: 0, pvToGrid: 0, gridToHome: 0, gridToBattery: 0, batteryToHome: 0, batteryToGrid: 0, total: 0 };
     const date = request.query.date || new Date().toISOString().split("T")[0];
     return flowsService.getSummary(date);
   });

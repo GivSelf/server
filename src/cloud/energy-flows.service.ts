@@ -32,6 +32,20 @@ const GROUPING_MAP: Record<string, number> = {
   yearly: 3,
 };
 
+/**
+ * Maps each energy_flows directional column to its locally-collected
+ * energy_metrics power column (watts). `battery_to_grid` is not captured over
+ * Modbus, so it is emitted as 0.
+ */
+const METRIC_FLOW_COLS: ReadonlyArray<readonly [string, string]> = [
+  ["pv_to_home", "solar_to_house_w"],
+  ["pv_to_battery", "solar_to_battery_w"],
+  ["pv_to_grid", "solar_to_grid_w"],
+  ["grid_to_home", "grid_to_house_w"],
+  ["grid_to_battery", "grid_to_battery_w"],
+  ["battery_to_home", "battery_to_house_w"],
+];
+
 function mapCloudEntry(entry: EnergyFlowEntry): FlowBar {
   const d = entry.data;
   return {
@@ -98,7 +112,17 @@ interface CacheEntry<T> {
 export class EnergyFlowsService {
   private cache = new Map<string, CacheEntry<FlowBar[]>>();
 
-  constructor(private readonly client: GivEnergyCloudClient) {}
+  /**
+   * The cloud client is OPTIONAL. Analytics derive from locally-collected
+   * `energy_metrics` and the imported `energy_flows` table; the GivEnergy cloud
+   * is only a last-resort fallback. With no client, that fallback is skipped.
+   */
+  constructor(private client: GivEnergyCloudClient | null) {}
+
+  /** Refresh the cloud client (e.g. after credentials are saved/cleared). */
+  setClient(client: GivEnergyCloudClient | null): void {
+    this.client = client;
+  }
 
   async getFlows(date: string, grouping: string): Promise<FlowBar[]> {
     const cacheKey = `${date}:${grouping}`;
@@ -107,15 +131,23 @@ export class EnergyFlowsService {
       return cached.data;
     }
 
-    // Try local DB first
+    // 1. Derive flows from locally-collected Modbus metrics (your own data)
+    const metricBars = await this.queryMetrics(date, grouping);
+    if (metricBars.length > 0) {
+      console.log(`[flows] Metrics-derived for ${date} (${grouping}): ${metricBars.length} bars`);
+      this.cacheResult(cacheKey, metricBars, date);
+      return metricBars;
+    }
+
+    // 2. Fall back to the imported energy_flows table (older, pre-collection dates)
     const bars = await this.queryDb(date, grouping);
     if (bars.length > 0) {
-      console.log(`[flows] DB hit for ${date} (${grouping}): ${bars.length} bars`);
+      console.log(`[flows] energy_flows hit for ${date} (${grouping}): ${bars.length} bars`);
       this.cacheResult(cacheKey, bars, date);
       return bars;
     }
 
-    // Fall back to cloud API
+    // 3. Last resort: GivEnergy cloud (Premium-gated — may return nothing, never fatal)
     console.log(`[flows] Cloud API fetch for ${date} (${grouping})`);
     const cloudBars = await this.fetchFromCloud(date, grouping);
     this.cacheResult(cacheKey, cloudBars, date);
@@ -201,11 +233,87 @@ export class EnergyFlowsService {
     }
   }
 
+  /**
+   * Derive flow bars from the locally-collected energy_metrics table by
+   * integrating instantaneous power (W) into energy (kWh) per bucket.
+   *
+   * Each reading is bucketed into 30-minute windows; energy for a window is
+   * AVG(power_W) * 0.5h / 1000. Daily/monthly groupings sum those windows so
+   * partial (in-progress) periods aren't extrapolated.
+   */
+  private async queryMetrics(date: string, grouping: string): Promise<FlowBar[]> {
+    try {
+      const { startDate, endDate } = getDateRange(date, grouping);
+      const db = getDb();
+      console.log(`[flows] Metrics query: ${grouping} ${startDate} → ${endDate}`);
+
+      // Per-30-min energy (kWh) for each directional flow.
+      const bucketEnergy = METRIC_FLOW_COLS
+        .map(([dest, src]) => `COALESCE(AVG(${src}), 0) * 0.5 / 1000.0 AS ${dest}`)
+        .join(",\n          ");
+      const where = `time >= '${startDate}T00:00:00Z' AND time < '${endDate}T00:00:00Z'`;
+
+      if (grouping === "half-hourly") {
+        const rows = await db.execute(sql.raw(`
+          SELECT
+            time_bucket('30 minutes', time) AS start_time,
+            time_bucket('30 minutes', time) + '30 minutes'::interval AS end_time,
+            ${bucketEnergy},
+            0 AS battery_to_grid
+          FROM energy_metrics
+          WHERE ${where}
+          GROUP BY time_bucket('30 minutes', time)
+          ORDER BY start_time
+        `));
+        return rows.map((r: Record<string, unknown>) => mapDbRow(r));
+      }
+
+      // Aggregate 30-min bucket energies up to days or months.
+      const trunc = grouping === "monthly" ? "month" : "day";
+      const interval = grouping === "monthly" ? "1 month" : "1 day";
+      const sumEnergy = METRIC_FLOW_COLS
+        .map(([dest]) => `SUM(${dest}) AS ${dest}`)
+        .join(",\n          ");
+      const rows = await db.execute(sql.raw(`
+        WITH buckets AS (
+          SELECT
+            time_bucket('30 minutes', time) AS bucket,
+            ${bucketEnergy}
+          FROM energy_metrics
+          WHERE ${where}
+          GROUP BY time_bucket('30 minutes', time)
+        )
+        SELECT
+          date_trunc('${trunc}', bucket) AS start_time,
+          date_trunc('${trunc}', bucket) + '${interval}'::interval AS end_time,
+          ${sumEnergy},
+          0 AS battery_to_grid
+        FROM buckets
+        GROUP BY date_trunc('${trunc}', bucket)
+        ORDER BY 1
+      `));
+      return rows.map((r: Record<string, unknown>) => mapDbRow(r));
+    } catch (err) {
+      console.error("[flows] Metrics query error:", (err as Error).message);
+      return [];
+    }
+  }
+
   private async fetchFromCloud(date: string, grouping: string): Promise<FlowBar[]> {
-    const groupingId = GROUPING_MAP[grouping] ?? 0;
-    const { startDate, endDate } = getDateRange(date, grouping);
-    const entries = await this.client.getEnergyFlows(startDate, endDate, groupingId);
-    return entries.map(mapCloudEntry);
+    if (!this.client) {
+      console.log(`[flows] No cloud client configured; serving empty for ${date} (${grouping})`);
+      return [];
+    }
+    try {
+      const groupingId = GROUPING_MAP[grouping] ?? 0;
+      const { startDate, endDate } = getDateRange(date, grouping);
+      const entries = await this.client.getEnergyFlows(startDate, endDate, groupingId);
+      return entries.map(mapCloudEntry);
+    } catch (err) {
+      // Premium-gated or offline — degrade to empty rather than 500-ing the page.
+      console.warn(`[flows] Cloud fetch unavailable for ${date} (${grouping}): ${(err as Error).message}`);
+      return [];
+    }
   }
 
   private cacheResult(key: string, bars: FlowBar[], date: string): void {
@@ -215,15 +323,23 @@ export class EnergyFlowsService {
   }
 }
 
-/** Singleton factory — creates EnergyFlowsService on demand from DB credentials */
+/**
+ * Singleton factory. Always returns a service — analytics run on local data and
+ * need no GivEnergy credentials. If credentials are present, a cloud client is
+ * attached as a last-resort fallback; the client is refreshed on each call so
+ * the service picks up newly-saved (or cleared) credentials without a restart.
+ */
 let _flowsInstance: EnergyFlowsService | null = null;
-export async function getOrCreateFlowsService(): Promise<EnergyFlowsService | null> {
-  if (_flowsInstance) return _flowsInstance;
+export async function getOrCreateFlowsService(): Promise<EnergyFlowsService> {
   const { getSetting } = await import("../services/settings.service.js");
   const key = await getSetting("givenergy_api_key");
   const serial = await getSetting("givenergy_inverter_serial");
-  if (!key || !serial) return null;
-  const client = new GivEnergyCloudClient(key, serial);
+  const client = key && serial ? new GivEnergyCloudClient(key, serial) : null;
+
+  if (_flowsInstance) {
+    _flowsInstance.setClient(client);
+    return _flowsInstance;
+  }
   _flowsInstance = new EnergyFlowsService(client);
   return _flowsInstance;
 }
