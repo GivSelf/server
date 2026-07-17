@@ -102,18 +102,15 @@ export class ForecastService {
 
       const db = getDb();
 
-      // Get forecast points for the requested date from the most recent fetch that covers it
+      // For each half-hour slot in the day, take the most-recently-fetched value.
+      // (A single MAX(fetched_at) fetch only covers ±48h around its own time, so
+      // for past days it clips just the tail — DISTINCT ON gives full-day coverage.)
       const rows = await db.execute(sql`
-        SELECT period_end, pv_estimate_kw, source
+        SELECT DISTINCT ON (period_end) period_end, pv_estimate_kw, source
         FROM solar_forecasts
-        WHERE fetched_at = (
-          SELECT MAX(fetched_at) FROM solar_forecasts
-          WHERE period_end >= ${date}::timestamptz
-            AND period_end < ${nextDateStr}::timestamptz
-        )
-          AND period_end >= ${date}::timestamptz
+        WHERE period_end >= ${date}::timestamptz
           AND period_end < ${nextDateStr}::timestamptz
-        ORDER BY period_end
+        ORDER BY period_end, fetched_at DESC
       `);
 
       return rows.map((r: Record<string, unknown>) => ({
@@ -178,17 +175,13 @@ export async function getLatestForecastDirect(date: string): Promise<ForecastPoi
     nextDay.setUTCDate(nextDay.getUTCDate() + 1);
     const nextDateStr = nextDay.toISOString().split("T")[0];
 
+    // Latest value per half-hour slot for the day (see getLatestForecast for why).
     const rows = await db.execute(sql`
-      SELECT period_end, pv_estimate_kw, source
+      SELECT DISTINCT ON (period_end) period_end, pv_estimate_kw, source
       FROM solar_forecasts
-      WHERE fetched_at = (
-        SELECT MAX(fetched_at) FROM solar_forecasts
-        WHERE period_end >= ${date}::timestamptz
-          AND period_end < ${nextDateStr}::timestamptz
-      )
-        AND period_end >= ${date}::timestamptz
+      WHERE period_end >= ${date}::timestamptz
         AND period_end < ${nextDateStr}::timestamptz
-      ORDER BY period_end
+      ORDER BY period_end, fetched_at DESC
     `);
 
     return rows.map((r: Record<string, unknown>) => ({

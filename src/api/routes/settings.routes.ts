@@ -21,13 +21,20 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
         const { SolcastClient } = await import("../../cloud/solcast-api.js");
         const client = new SolcastClient(solcastKey, solcastSite);
         const site = await client.getSiteInfo();
-        await setSettings({
-          forecast_latitude: String(site.latitude),
-          forecast_longitude: String(site.longitude),
-          forecast_tilt: String(site.tilt),
-          forecast_azimuth: String(site.azimuth),
-          forecast_capacity_kwp: String(site.capacity),
-        });
+        // Only persist geometry fields that are actually valid numbers — never
+        // store "undefined"/NaN, which would break the Forecast.Solar request URL.
+        const geometry: Record<string, string> = {};
+        const fields: [string, number][] = [
+          ["forecast_latitude", site.latitude],
+          ["forecast_longitude", site.longitude],
+          ["forecast_tilt", site.tilt],
+          ["forecast_azimuth", site.azimuth],
+          ["forecast_capacity_kwp", site.capacity],
+        ];
+        for (const [key, val] of fields) {
+          if (Number.isFinite(val)) geometry[key] = String(val);
+        }
+        if (Object.keys(geometry).length > 0) await setSettings(geometry);
         console.log(`[settings] Auto-fetched Solcast site geometry: ${site.latitude}, ${site.longitude}`);
       } catch (err) {
         console.warn("[settings] Failed to fetch Solcast site info:", (err as Error).message);
