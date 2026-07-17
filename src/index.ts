@@ -38,13 +38,22 @@ async function main() {
   // Solar forecast services
   let forecastService: ForecastService | null = null;
   {
-    // Load forecast params: DB first (auto-populated from Solcast), then env fallback
+    // Load forecast params: DB first (auto-populated from Solcast), then env fallback.
+    // Guard against bad stored values (e.g. the literal string "undefined") — a
+    // truthy-but-non-numeric setting must fall through to env/default, not become NaN.
     const { getSetting } = await import("./services/settings.service.js");
-    const fsLat = parseFloat(await getSetting("forecast_latitude") || process.env.FORECAST_LATITUDE || "51.5");
-    const fsLon = parseFloat(await getSetting("forecast_longitude") || process.env.FORECAST_LONGITUDE || "-0.1");
-    const fsTilt = parseFloat(await getSetting("forecast_tilt") || process.env.FORECAST_TILT || "35");
-    const fsAzimuth = parseFloat(await getSetting("forecast_azimuth") || process.env.FORECAST_AZIMUTH || "180");
-    const fsCapacity = parseFloat(await getSetting("forecast_capacity_kwp") || process.env.FORECAST_CAPACITY_KWP || "5");
+    const numParam = (val: string | null, envVal: string | undefined, def: number): number => {
+      for (const candidate of [val, envVal]) {
+        const n = parseFloat(candidate ?? "");
+        if (Number.isFinite(n)) return n;
+      }
+      return def;
+    };
+    const fsLat = numParam(await getSetting("forecast_latitude"), process.env.FORECAST_LATITUDE, 51.5);
+    const fsLon = numParam(await getSetting("forecast_longitude"), process.env.FORECAST_LONGITUDE, -0.1);
+    const fsTilt = numParam(await getSetting("forecast_tilt"), process.env.FORECAST_TILT, 35);
+    const fsAzimuth = numParam(await getSetting("forecast_azimuth"), process.env.FORECAST_AZIMUTH, 180);
+    const fsCapacity = numParam(await getSetting("forecast_capacity_kwp"), process.env.FORECAST_CAPACITY_KWP, 5);
     const fsSolarClient = new ForecastSolarClient(fsLat, fsLon, fsTilt, fsAzimuth, fsCapacity);
     console.log(`[main] Forecast.Solar: lat=${fsLat}, lon=${fsLon}, tilt=${fsTilt}, azimuth=${fsAzimuth}, capacity=${fsCapacity}kWp`);
 

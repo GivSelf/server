@@ -36,8 +36,14 @@ export class SolcastClient {
       const text = await res.text().catch(() => "");
       throw new Error(`Solcast API ${res.status}: ${text.slice(0, 200)}`);
     }
-    const data = await res.json() as Record<string, unknown>;
-    return data as unknown as SolcastSiteInfo;
+    // Solcast wraps the fields in a `site` object: { "site": { latitude, ... } }.
+    // Reading the top level directly yields undefined for every field.
+    const data = await res.json() as { site?: SolcastSiteInfo };
+    const site = data.site;
+    if (!site || typeof site.latitude !== "number") {
+      throw new Error("Solcast site info: unexpected response shape (missing site.latitude)");
+    }
+    return site;
   }
 
   private async request(path: string): Promise<Record<string, SolcastForecastPoint[]>> {
