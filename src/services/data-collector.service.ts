@@ -69,15 +69,22 @@ export class DataCollectorService {
     }
   }
 
-  /** Fetch the inverter/battery power rating once to bound plausible PV/battery
-   *  readings. Retries each poll until it succeeds; falls back to a default. */
+  /** Establish a plausible bound for PV/battery power, once. Prefers the inverter
+   *  rating; adapters that don't expose one (the GivEnergy Modbus adapter reports
+   *  only model + serial) fall back to the configured solar capacity (kWp), which
+   *  bounds both PV and battery power well. Retries each poll until it resolves. */
   private async ensureCeiling(): Promise<void> {
     if (this.inverterCeilingW !== null) return;
     try {
       const info = await this.adapter.getSystemInfo();
-      const maxRated = Math.max(info.inverterMaxPowerW ?? 0, info.batteryMaxPowerW ?? 0);
-      if (maxRated > 500) {
-        this.inverterCeilingW = maxRated * 2; // PV DC / transients can exceed AC rating
+      let ratedW = Math.max(info.inverterMaxPowerW ?? 0, info.batteryMaxPowerW ?? 0);
+      if (ratedW <= 500) {
+        const { getSetting } = await import("./settings.service.js");
+        const kwp = parseFloat((await getSetting("forecast_capacity_kwp")) ?? "");
+        if (Number.isFinite(kwp) && kwp > 0) ratedW = kwp * 1000;
+      }
+      if (ratedW > 500) {
+        this.inverterCeilingW = Math.round(ratedW * 2); // PV DC / transients exceed AC rating
         console.log(`[collector] PV/battery plausibility ceiling: ${this.inverterCeilingW} W`);
       }
     } catch {
