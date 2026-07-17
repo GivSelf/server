@@ -103,14 +103,16 @@ export class ForecastService {
       const db = getDb();
 
       // For each half-hour slot in the day, take the most-recently-fetched value.
-      // (A single MAX(fetched_at) fetch only covers ±48h around its own time, so
+      // Latest value per (source, slot). Distinct on source too — otherwise the
+      // two providers interleave slot-by-slot into one zig-zag line. Callers draw
+      // one line per source. (A single MAX(fetched_at) fetch only covers ±48h, so
       // for past days it clips just the tail — DISTINCT ON gives full-day coverage.)
       const rows = await db.execute(sql`
-        SELECT DISTINCT ON (period_end) period_end, pv_estimate_kw, source
+        SELECT DISTINCT ON (source, period_end) period_end, pv_estimate_kw, source
         FROM solar_forecasts
         WHERE period_end >= ${date}::timestamptz
           AND period_end < ${nextDateStr}::timestamptz
-        ORDER BY period_end, fetched_at DESC
+        ORDER BY source, period_end, fetched_at DESC
       `);
 
       return rows.map((r: Record<string, unknown>) => ({
@@ -175,13 +177,13 @@ export async function getLatestForecastDirect(date: string): Promise<ForecastPoi
     nextDay.setUTCDate(nextDay.getUTCDate() + 1);
     const nextDateStr = nextDay.toISOString().split("T")[0];
 
-    // Latest value per half-hour slot for the day (see getLatestForecast for why).
+    // Latest value per (source, slot) — one series per source (see getLatestForecast).
     const rows = await db.execute(sql`
-      SELECT DISTINCT ON (period_end) period_end, pv_estimate_kw, source
+      SELECT DISTINCT ON (source, period_end) period_end, pv_estimate_kw, source
       FROM solar_forecasts
       WHERE period_end >= ${date}::timestamptz
         AND period_end < ${nextDateStr}::timestamptz
-      ORDER BY period_end, fetched_at DESC
+      ORDER BY source, period_end, fetched_at DESC
     `);
 
     return rows.map((r: Record<string, unknown>) => ({
