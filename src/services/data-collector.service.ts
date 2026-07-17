@@ -1,13 +1,28 @@
 import type { EnergyAdapter } from "../adapters/adapter.interface.js";
+import type { LivePowerData } from "@givself/contracts";
 import { getDb } from "../db/connection.js";
 import { energyMetrics } from "../db/schema/energy-metrics.js";
 import { broadcast } from "../ws/channels.js";
 import { config } from "../config.js";
 import { sql } from "drizzle-orm";
 
+// Power columns that were originally SMALLINT and are widened to INTEGER.
+const POWER_COLUMNS = [
+  "pv_power_w", "battery_power_w", "grid_power_w", "load_power_w",
+  "solar_to_house_w", "solar_to_battery_w", "solar_to_grid_w",
+  "battery_to_house_w", "grid_to_house_w", "grid_to_battery_w",
+];
+
+// Absolute ceiling for any single power field — no residential system reaches
+// this; a reading above it is a transient Modbus misread.
+const GROSS_CEILING_W = 40000;
+const DEFAULT_INVERTER_CEILING_W = 20000;
+
 export class DataCollectorService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private tableReady = false;
+  private inverterCeilingW: number | null = null; // PV/battery bound (inverter-limited)
+  private rejectedCount = 0;
 
   constructor(private readonly adapter: EnergyAdapter) {}
 
@@ -18,17 +33,17 @@ export class DataCollectorService {
       await db.execute(sql`
         CREATE TABLE IF NOT EXISTS energy_metrics (
           time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          pv_power_w SMALLINT,
+          pv_power_w INTEGER,
           battery_soc SMALLINT,
-          battery_power_w SMALLINT,
-          grid_power_w SMALLINT,
-          load_power_w SMALLINT,
-          solar_to_house_w SMALLINT,
-          solar_to_battery_w SMALLINT,
-          solar_to_grid_w SMALLINT,
-          battery_to_house_w SMALLINT,
-          grid_to_house_w SMALLINT,
-          grid_to_battery_w SMALLINT,
+          battery_power_w INTEGER,
+          grid_power_w INTEGER,
+          load_power_w INTEGER,
+          solar_to_house_w INTEGER,
+          solar_to_battery_w INTEGER,
+          solar_to_grid_w INTEGER,
+          battery_to_house_w INTEGER,
+          grid_to_house_w INTEGER,
+          grid_to_battery_w INTEGER,
           grid_voltage_v REAL,
           battery_voltage_v REAL,
           battery_temp_c REAL
@@ -39,10 +54,49 @@ export class DataCollectorService {
       } catch {
         // Already a hypertable or not TimescaleDB
       }
+      // Widen SMALLINT -> INTEGER for existing installs (metadata-only, ~ms; a
+      // no-op once already INTEGER). Prevents out-of-range writes dropping rows.
+      for (const col of POWER_COLUMNS) {
+        try {
+          await db.execute(sql.raw(`ALTER TABLE energy_metrics ALTER COLUMN ${col} TYPE INTEGER`));
+        } catch {
+          // best-effort — glitch rejection keeps values in range regardless
+        }
+      }
       this.tableReady = true;
     } catch {
       // DB not available yet — will retry next poll
     }
+  }
+
+  /** Fetch the inverter/battery power rating once to bound plausible PV/battery
+   *  readings. Retries each poll until it succeeds; falls back to a default. */
+  private async ensureCeiling(): Promise<void> {
+    if (this.inverterCeilingW !== null) return;
+    try {
+      const info = await this.adapter.getSystemInfo();
+      const maxRated = Math.max(info.inverterMaxPowerW ?? 0, info.batteryMaxPowerW ?? 0);
+      if (maxRated > 500) {
+        this.inverterCeilingW = maxRated * 2; // PV DC / transients can exceed AC rating
+        console.log(`[collector] PV/battery plausibility ceiling: ${this.inverterCeilingW} W`);
+      }
+    } catch {
+      // keep trying next poll
+    }
+  }
+
+  /** Reject transient Modbus misreads (e.g. a 19 kW spike on a 5 kW system). */
+  private isPlausible(live: LivePowerData): boolean {
+    const invCeil = this.inverterCeilingW ?? DEFAULT_INVERTER_CEILING_W;
+    if ((live.pvPowerW ?? 0) > invCeil) return false;
+    if (Math.abs(live.batteryPowerW ?? 0) > invCeil) return false;
+    const all = [
+      live.pvPowerW, live.batteryPowerW, live.gridPowerW, live.loadPowerW,
+      live.flows?.solarToHouseW, live.flows?.solarToBatteryW, live.flows?.solarToGridW,
+      live.flows?.batteryToHouseW, live.flows?.batteryToGridW,
+      live.flows?.gridToHouseW, live.flows?.gridToBatteryW,
+    ];
+    return all.every((v) => v == null || Math.abs(v) <= GROSS_CEILING_W);
   }
 
   start(): void {
@@ -62,6 +116,17 @@ export class DataCollectorService {
     try {
       // Sequential — Modbus TCP is single-request-in-flight
       const live = await this.adapter.getLivePower();
+
+      // Drop implausible samples before they reach the live feed or the DB.
+      await this.ensureCeiling();
+      if (!this.isPlausible(live)) {
+        this.rejectedCount++;
+        if (this.rejectedCount % 25 === 1) {
+          console.warn(`[collector] rejected implausible reading (pv=${live.pvPowerW}W, battery=${live.batteryPowerW}W, grid=${live.gridPowerW}W); ${this.rejectedCount} total`);
+        }
+        return;
+      }
+
       const energy = await this.adapter.getEnergyToday();
 
       // Broadcast via WebSocket (WsServerMessage oneof structure)

@@ -84,6 +84,10 @@ async function main() {
     done();
   });
 
+  // Liveness check — cheap, no adapter/DB access, so a slow inverter (Modbus)
+  // read never marks the container unhealthy. Use this for the Docker healthcheck.
+  app.get("/api/health", async () => ({ ok: true }));
+
   // Register routes — settings always available (even without cloud API)
   const { settingsRoutes } = await import("./api/routes/settings.routes.js");
   await settingsRoutes(app);
